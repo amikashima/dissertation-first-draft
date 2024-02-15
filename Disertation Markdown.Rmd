@@ -1,0 +1,1803 @@
+---
+title: "Dissertation Markdown Script"
+author: "Ami"
+date: "2023-09-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Asylum Application from 2010 to 2022
+
+```{r intro}
+asylum_data <- read.csv("Home Office Asylum Application Data.csv")
+asylum_data$Year <- as.factor(asylum_data$Year)
+
+ggplot(asylum_data, aes(x = Year, y = Thousands)) +
+  geom_bar(stat = "identity", fill = "skyblue", alpha = 0.8) +
+  labs(x = "Year",
+       y = "Thousands") +
+  theme(axis.text.x = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"),
+        legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold"),
+        legend.position = c("right"), legend.box = "horizontal",
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+```
+
+## Webscraping Debates from 2015 to 2023
+
+1) Setting working directory and loading libraries
+```{r 1}
+setwd("~/Desktop/Dissertation")
+library(XML)
+library(stringi)
+```
+
+2) Customised Script for Extracting Speeches and Attributes
+```{r 2}
+
+# The following customised functions was adapted from Watanabe's (2014) script
+# https://blog.koheiw.net/?p=33
+
+# Function that extracts speech text
+getSpeechText <- function(x) {
+  ps <- unlist(xpathApply(x, './p', xmlValue))
+  text <- paste(unlist(ps), collapse = "\n")
+  return(stri_trim(text))
+}
+
+# Function that extracts date from speech_id
+getDate <- function(x) {
+  parts <- unlist(stri_split_fixed(x, '/'))
+  date <- stri_sub(parts[3], 1, 10)
+  return(date)
+}
+
+# Function that extracts MP ID 
+getPersonId <- function(x) {
+  parts <- unlist(stri_split_fixed(x, '/'))
+  return(parts[3])
+}
+
+# Overall function that extracts speeches and attributes from each XML file
+getSpeech <- function(speech, debate_title) {
+  
+  # extracting attributes
+  attribs <- xmlAttrs(speech)
+  
+  speech_id <- ifelse("id" %in% names(attribs), attribs[["id"]], "")
+  speaker_name <- ifelse("speakername" %in% names(attribs), attribs[["speakername"]], "")
+  person_id <- ifelse("person_id" %in% names(attribs), getPersonId(attribs[["person_id"]]), "")
+  date <- ifelse("id" %in% names(attribs), getDate(attribs[["id"]]), "")
+  time <- ifelse("time" %in% names(attribs), attribs[["time"]], "")
+  type <- ifelse("type" %in% names(attribs), attribs[["type"]], "")
+  colnum <- ifelse("colnum" %in% names(attribs), attribs[["colnum"]], "")
+  
+  # extracting speech text
+  speech_text <- getSpeechText(speech)
+  
+  list(speech_id, speaker_name, person_id, date, time, type, colnum, speech_text, debate_title)
+}
+
+# Function that reads all content of a XML file 
+readFile <- function(fileName) {
+  lines <- readLines(fileName, encoding = "UTF-8")
+  return(paste(lines, collapse = '\n'))
+}
+
+# Function that takes a directory path as an input and reads all XML files in the directory path 
+readDebateDir <- function(dir) {
+  files <- list.files(dir, full.names = TRUE, recursive = TRUE, pattern = "\\.xml$")
+  result <- data.frame()
+  for(file in files){
+    result <- rbind(result, readDebateXML(file))
+  }
+  return(result)
+}
+
+# Function for reading XML and extracting speeches
+readDebateXML <- function(file) {
+  #cat('Reading', file, '\n')
+  xml <- xmlParse(readFile(file))
+  result <- data.frame()
+  
+  # debate title
+  current_heading <- ""
+  
+  for (node in getNodeSet(xml, "//*")) {
+    if (xmlName(node) %in% c("major-heading","minor-heading")) {
+      current_heading <- xmlValue(node)
+      
+    } else if (xmlName(node) == "speech") {
+      values <- getSpeech(node, current_heading)
+      
+      debate_title <- values[[9]]
+      
+      # debate_title must contain these keywords
+      keywords <- c("asylum", "refugee", "english channel", "channel crossing", 
+                    "nationality and borders", "boat crossing", "migration", 
+                    "migrant", "migrants", "homes for ukraine", 
+                    "resettlement programme", "Evacuations from Afghanistan", 
+                    "Afghan Citizens Resettlement Scheme",
+                    "Afghan Resettlement Update", 
+                    "Provision for Chagos Islanders to acquire British nationality")
+      if (any(grepl(paste(keywords, collapse = "|"), debate_title, ignore.case = TRUE))) {
+        temp <- data.frame(
+          speech_id = values[[1]],
+          speaker_name = values[[2]],
+          person_id = values[[3]],
+          date = values[[4]],
+          time = values[[5]],
+          type = values[[6]],
+          colnum = values[[7]],
+          speech_text = values[[8]],
+          debate_title = debate_title,
+          stringsAsFactors = FALSE
+        )
+        result <- rbind(result, temp)
+      }
+    }
+  }
+  
+  # removing rows speaker_name that are empty or "Mr Speaker"
+  result <- result[!is.na(result$speaker_name) & result$speaker_name != "" & 
+                     result$speaker_name != "Mr Speaker" & 
+                     !grepl("several", result$speaker_name, ignore.case = TRUE), ]
+  
+  return(result)
+}
+```
+
+3) Loading MP data
+```{r 3}
+# Load data set containing MP political Party
+mp_party <- read.csv("mps.csv") # 2019
+mp_party_2017 <- read.csv("mps_2017.csv") # 2017  
+mp_party_2015 <- read.csv("mps_2015.csv") # 2015
+
+# Convert Person.ID column to character 
+mp_party$Person.ID <- as.character(mp_party$Person.ID)
+mp_party_2017$Person.ID <- as.character(mp_party_2017$Person.ID)
+mp_party_2015$Person.ID <- as.character(mp_party_2015$Person.ID)
+```
+
+4) Loading Debate Data + Merging with MP data + Filling Missing Data 
+```{r 4, message=FALSE, results="hide"}
+##### 2023 merged debate data #####
+library(dplyr)
+debate_2023 <- readDebateDir("~/Desktop/Dissertation/scrapedxml_2023/debates/")
+debate_2023 <- left_join(debate_2023, mp_party, by = c("person_id" = "Person.ID"))
+debate_2023 <- subset(debate_2023, select = -c(First.name, Last.name))
+
+debate_2023[debate_2023$speaker_name == "Boris Johnson", "Party"] <- "Conservative"
+debate_2023[debate_2023$speaker_name == "Boris Johnson", "Constituency"] <- "Uxbridge and South Ruislip"
+debate_2023[debate_2023$speaker_name == "Boris Johnson", "URI"] <- "https://www.theyworkforyou.com/mp/10999/boris_johnson/uxbridge_and_south_ruislip"
+
+##### 2022 merged debate data #####
+debate_2022 <- readDebateDir("~/Desktop/Dissertation/scrapedxml_2022/debates/")
+debate_2022 <- left_join(debate_2022, mp_party, by = c("person_id" = "Person.ID"))
+debate_2022 <- subset(debate_2022, select = -c(First.name, Last.name))
+
+# Filling the missing data for Chris Matheson 
+debate_2022[debate_2022$speaker_name == "Chris Matheson", "Party"] <- "Labour"
+debate_2022[debate_2022$speaker_name == "Chris Matheson", "Constituency"] <- "City of Chester"
+debate_2022[debate_2022$speaker_name == "Chris Matheson", "URI"] <- "https://www.theyworkforyou.com/mp/25411/chris_matheson/city_of_chester"
+
+# Filling the missing data for Boris Johnson
+debate_2022[debate_2022$speaker_name == "Boris Johnson", "Party"] <- "Conservative"
+debate_2022[debate_2022$speaker_name == "Boris Johnson", "Constituency"] <- "Uxbridge and South Ruislip"
+debate_2022[debate_2022$speaker_name == "Boris Johnson", "URI"] <- "https://www.theyworkforyou.com/mp/10999/boris_johnson/uxbridge_and_south_ruislip"
+
+# Filling the missing data for Kate Green
+debate_2022[debate_2022$speaker_name == "Kate Green", "Party"] <- "Labour"
+debate_2022[debate_2022$speaker_name == "Kate Green", "Constituency"] <- "Stretford and Urmston"
+debate_2022[debate_2022$speaker_name == "Kate Green", "URI"] <- "https://www.theyworkforyou.com/mp/24896/kate_green/stretford_and_urmston"
+
+# Filling the missing data for Kate Green
+debate_2022[debate_2022$speaker_name == "Kate Green", "Party"] <- "Labour"
+debate_2022[debate_2022$speaker_name == "Kate Green", "Constituency"] <- "Stretford and Urmston"
+debate_2022[debate_2022$speaker_name == "Kate Green", "URI"] <- "https://www.theyworkforyou.com/mp/24896/kate_green/stretford_and_urmston"
+
+# Filling the missing data for Nadine Dorries
+debate_2022[debate_2022$speaker_name == "Nadine Dorries", "Party"] <- "Conservative"
+debate_2022[debate_2022$speaker_name == "Nadine Dorries", "Constituency"] <- "Mid Bedfordshire"
+debate_2022[debate_2022$speaker_name == "Nadine Dorries", "URI"] <- "https://www.theyworkforyou.com/mp/11397/nadine_dorries/mid_bedfordshire"
+
+##### 2021 merged debate data #####
+
+debate_2021 <- readDebateDir("~/Desktop/Dissertation/scrapedxml_2021/debates/")
+debate_2021 <- left_join(debate_2021, mp_party, by = c("person_id" = "Person.ID")) 
+debate_2021 <- subset(debate_2021, select = -c(First.name, Last.name))
+
+# Filling the missing data for Sir David Amess
+debate_2021[debate_2021$speaker_name == "Sir David Amess", "Party"] <- "Conservative"
+debate_2021[debate_2021$speaker_name == "Sir David Amess", "Constituency"] <- "Southend West"
+debate_2021[debate_2021$speaker_name == "Sir David Amess", "URI"] <- "https://www.theyworkforyou.com/mp/10009/sir_david_amess/southend_west"
+
+# Filling the missing data for Nigel Adams
+debate_2021[debate_2021$speaker_name == "Nigel Adams", "Party"] <- "Conservative"
+debate_2021[debate_2021$speaker_name == "Nigel Adams", "Constituency"] <- "Selby and Ainsty"
+debate_2021[debate_2021$speaker_name == "Nigel Adams", "URI"] <- "https://www.theyworkforyou.com/mp/24878/nigel_adams/selby_and_ainsty"
+
+
+##### 2020 merged debate data ##### 
+
+debate_2020 <- readDebateDir("~/Desktop/Dissertation/scrapedxml_2020/debates/")
+debate_2020 <- left_join(debate_2020, mp_party, by = c("person_id" = "Person.ID")) 
+debate_2020 <- subset(debate_2020, select = -c(First.name, Last.name))
+
+# missing data for Jack Dromey, Mike Hill, Kate Green, and Neil Gray 
+
+# Filling the missing data for Jack Dromey
+debate_2020[debate_2020$speaker_name == "Jack Dromey", "Party"] <- "Labour"
+debate_2020[debate_2020$speaker_name == "Jack Dromey", "Constituency"] <- "Birmingham, Erdington"
+debate_2020[debate_2020$speaker_name == "Jack Dromey", "URI"] <- "https://www.theyworkforyou.com/mp/24825/jack_dromey/birmingham%2C_erdington"
+
+# Filling the missing data for Mike Hill 
+debate_2020[debate_2020$speaker_name == "Mike Hill", "Party"] <- "Labour"
+debate_2020[debate_2020$speaker_name == "Mike Hill", "Constituency"] <- "Hartlepool"
+debate_2020[debate_2020$speaker_name == "Mike Hill", "URI"] <- "https://www.theyworkforyou.com/mp/25619/mike_hill/hartlepool"
+
+# Filling the missing data for Kate Green
+debate_2020[debate_2020$speaker_name == "Kate Green", "Party"] <- "Labour"
+debate_2020[debate_2020$speaker_name == "Kate Green", "Constituency"] <- "Stretford and Urmston"
+debate_2020[debate_2020$speaker_name == "Kate Green", "URI"] <- "https://www.theyworkforyou.com/mp/24896/kate_green/stretford_and_urmston"
+
+# Filling the missing data for Neil Gray  
+debate_2020[debate_2020$speaker_name == "Neil Gray", "Party"] <- "Scottish National Party"
+debate_2020[debate_2020$speaker_name == "Neil Gray", "Constituency"] <- "Airdrie and Shotts"
+debate_2020[debate_2020$speaker_name == "Neil Gray", "URI"] <- "https://www.theyworkforyou.com/mp/25293/neil_gray/airdrie_and_shotts"
+
+# Filling the missing data for Nigel Adams
+debate_2020[debate_2020$speaker_name == "Nigel Adams", "Party"] <- "Conservative"
+debate_2020[debate_2020$speaker_name == "Nigel Adams", "Constituency"] <- "Selby and Ainsty"
+debate_2020[debate_2020$speaker_name == "Nigel Adams", "URI"] <- "https://www.theyworkforyou.com/mp/24878/nigel_adams/selby_and_ainsty"
+
+##### 2019 merged debate data ##### 
+
+debate_2019 <- readDebateDir("~/Desktop/Dissertation/scrapedxml_2019/debates/")
+debate_2019 <- left_join(debate_2019, mp_party_2017, by = c("person_id" = "Person.ID"))
+debate_2019 <- subset(debate_2019, select = -c(First.name, Last.name))
+
+# Filling the missing data for Janet Daby 
+debate_2019[debate_2019$speaker_name == "Janet Daby", "Party"] <- "Labour"
+debate_2019[debate_2019$speaker_name == "Janet Daby", "Constituency"] <- "Lewisham East"
+debate_2019[debate_2019$speaker_name == "Janet Daby", "URI"] <- "https://www.theyworkforyou.com/mp/25727/janet_daby/lewisham_east"
+
+# Filling the missing data for Ruth Jones
+debate_2019[debate_2019$speaker_name == "Ruth Jones", "Party"] <- "Labour"
+debate_2019[debate_2019$speaker_name == "Ruth Jones", "Constituency"] <- "Newport West"
+debate_2019[debate_2019$speaker_name == "Ruth Jones", "URI"] <- "https://www.theyworkforyou.com/mp/25746/ruth_jones/newport_west"
+
+##### 2018 merged debate data ##### 
+
+# 2018 debate data: merged to MP party data
+debate_2018 <- readDebateDir("~/Desktop/Dissertation/scrapedxml_2018/debates/")
+debate_2018 <- left_join(debate_2018, mp_party_2017, by = c("person_id" = "Person.ID"))
+debate_2018 <- subset(debate_2018, select = -c(First.name, Last.name))
+# no missing data
+
+##### 2017 merged debate data ##### 
+
+debate_2017 <- readDebateDir("~/Desktop/Dissertation/scrapedxml_2017/debates/")
+debate_2017 <- left_join(debate_2017, mp_party_2015, by = c("person_id" = "Person.ID"))
+debate_2017 <- subset(debate_2017, select = -c(First.name, Last.name))
+
+# missing Tracy Brabin, Robert Courts, Layla Moran, Mohammad Yasin, Alister Jack, Edward Davey, Dan Carden, Afzal Khan, Stephen Kerr
+
+# Filling the missing data for Tracy Brabin
+debate_2017[debate_2017$speaker_name == "Tracy Brabin", "Party"] <- "Labour/Co-operative"
+debate_2017[debate_2017$speaker_name == "Tracy Brabin", "Constituency"] <- "Batley and Spen"
+debate_2017[debate_2017$speaker_name == "Tracy Brabin", "URI"] <- "https://www.theyworkforyou.com/mp/25592/tracy_brabin/batley_and_spen"
+
+# Filling the missing data for Robert Courts
+debate_2017[debate_2017$speaker_name == "Robert Courts", "Party"] <- "Conservative"
+debate_2017[debate_2017$speaker_name == "Robert Courts", "Constituency"] <- "Witney"
+debate_2017[debate_2017$speaker_name == "Robert Courts", "URI"] <- "https://www.theyworkforyou.com/mp/25593/robert_courts/witney"
+
+# Filling the missing data for Layla Moran
+debate_2017[debate_2017$speaker_name == "Layla Moran", "Party"] <- "Liberal Democrat"
+debate_2017[debate_2017$speaker_name == "Layla Moran", "Constituency"] <- "Oxford West and Abingdon"
+debate_2017[debate_2017$speaker_name == "Layla Moran", "URI"] <- "https://www.theyworkforyou.com/mp/25689/layla_moran/oxford_west_and_abingdon"
+
+# Filling the missing data for Mohammad Yasin
+debate_2017[debate_2017$speaker_name == "Mohammad Yasin", "Party"] <- "Labour"
+debate_2017[debate_2017$speaker_name == "Mohammad Yasin", "Constituency"] <- "Bedford"
+debate_2017[debate_2017$speaker_name == "Mohammad Yasin", "URI"] <- "https://www.theyworkforyou.com/mp/25649/mohammad_yasin/bedford"
+
+# Filling the missing data for Alister Jack
+debate_2017[debate_2017$speaker_name == "Alister Jack", "Party"] <- "Conservative"
+debate_2017[debate_2017$speaker_name == "Alister Jack", "Constituency"] <- "Dumfries and Galloway"
+debate_2017[debate_2017$speaker_name == "Alister Jack", "URI"] <- "https://www.theyworkforyou.com/mp/25674/alister_jack/dumfries_and_galloway"
+
+# Filling the missing data for Edward Davey
+debate_2017[debate_2017$speaker_name == "Edward Davey", "Party"] <- "Liberal Democrat"
+debate_2017[debate_2017$speaker_name == "Edward Davey", "Constituency"] <- "Kingston and Surbiton"
+debate_2017[debate_2017$speaker_name == "Edward Davey", "URI"] <- "https://www.theyworkforyou.com/mp/10155/edward_davey/kingston_and_surbiton"
+
+# Filling the missing data for Dan Carden
+debate_2017[debate_2017$speaker_name == "Dan Carden", "Party"] <- "Labour"
+debate_2017[debate_2017$speaker_name == "Dan Carden", "Constituency"] <- "Liverpool, Walton"
+debate_2017[debate_2017$speaker_name == "Dan Carden", "URI"] <- "https://www.theyworkforyou.com/mp/25642/dan_carden/liverpool%2C_walton"
+
+# Filling the missing data for Afzal Khan
+debate_2017[debate_2017$speaker_name == "Afzal Khan", "Party"] <- "Labour"
+debate_2017[debate_2017$speaker_name == "Afzal Khan", "Constituency"] <- "Manchester, Gorton"
+debate_2017[debate_2017$speaker_name == "Afzal Khan", "URI"] <- "https://www.theyworkforyou.com/mp/25662/afzal_khan/manchester%2C_gorton"
+
+# Filling the missing data for Stephen Kerr
+debate_2017[debate_2017$speaker_name == "Stephen Kerr", "Party"] <- "Conservative"
+debate_2017[debate_2017$speaker_name == "Stephen Kerr", "Constituency"] <- "Stirling"
+debate_2017[debate_2017$speaker_name == "Stephen Kerr", "URI"] <- "https://www.theyworkforyou.com/msp/25696/stephen_kerr"
+
+# Filling the missing data for Luke Pollard
+debate_2017[debate_2017$speaker_name == "Luke Pollard", "Party"] <- "Labour"
+debate_2017[debate_2017$speaker_name == "Luke Pollard", "Constituency"] <- "Plymouth, Sutton and Devonport"
+debate_2017[debate_2017$speaker_name == "Luke Pollard", "URI"] <- "https://www.theyworkforyou.com/mp/25690/luke_pollard/plymouth%2C_sutton_and_devonport"
+
+# Filling the missing data for David Linden
+debate_2017[debate_2017$speaker_name == "David Linden", "Party"] <- "Scottish National Party"
+debate_2017[debate_2017$speaker_name == "David Linden", "Constituency"] <- "Plymouth, Sutton and Devonport"
+debate_2017[debate_2017$speaker_name == "David Linden", "URI"] <- "https://www.theyworkforyou.com/mp/25677/david_linden/glasgow_east"
+
+# Filling the missing data for Ben Lake
+debate_2017[debate_2017$speaker_name == "Ben Lake", "Party"] <- "Plaid Cymru"
+debate_2017[debate_2017$speaker_name == "Ben Lake", "Constituency"] <- "Ceredigion"
+debate_2017[debate_2017$speaker_name == "Ben Lake", "URI"] <- "https://www.theyworkforyou.com/mp/25669/ben_lake/ceredigion"
+
+# Filling the missing data for Jo Swinson
+debate_2017[debate_2017$speaker_name == "Jo Swinson", "Party"] <- "Liberal Democrat"
+debate_2017[debate_2017$speaker_name == "Jo Swinson", "Constituency"] <- "East Dunbartonshire"
+debate_2017[debate_2017$speaker_name == "Jo Swinson", "URI"] <- "https://www.theyworkforyou.com/mp/11971/jo_swinson/east_dunbartonshire"
+
+# Filling the missing data for Bambos Charalambous 
+debate_2017[debate_2017$speaker_name == "Bambos Charalambous", "Party"] <- "Independent"
+debate_2017[debate_2017$speaker_name == "Bambos Charalambous", "Constituency"] <- "Enfield, Southgate"
+debate_2017[debate_2017$speaker_name == "Bambos Charalambous", "URI"] <- "https://www.theyworkforyou.com/mp/25676/bambos_charalambous/enfield%2C_southgate"
+
+# Filling the missing data for  
+debate_2017[debate_2017$speaker_name == "Bambos Charalambous", "Party"] <- "Independent"
+debate_2017[debate_2017$speaker_name == "Bambos Charalambous", "Constituency"] <- "Enfield, Southgate"
+debate_2017[debate_2017$speaker_name == "Bambos Charalambous", "URI"] <- "https://www.theyworkforyou.com/mp/25676/bambos_charalambous/enfield%2C_southgate"
+
+# Filling the missing data for Thelma Walker
+debate_2017[debate_2017$speaker_name == "Thelma Walker", "Party"] <- "Labour"
+debate_2017[debate_2017$speaker_name == "Thelma Walker", "Constituency"] <- "Colne Valley"
+debate_2017[debate_2017$speaker_name == "Thelma Walker", "URI"] <- "https://www.theyworkforyou.com/mp/25671/thelma_walker/colne_valley"
+
+# Filling the missing data for Alex Sobel
+debate_2017[debate_2017$speaker_name == "Alex Sobel", "Party"] <- "Labour"
+debate_2017[debate_2017$speaker_name == "Alex Sobel", "Constituency"] <- "Leeds North West"
+debate_2017[debate_2017$speaker_name == "Alex Sobel", "URI"] <- "https://www.theyworkforyou.com/mp/25680/alex_sobel/leeds_north_west"
+
+# Filling the missing data for Hugh Gaffney
+debate_2017[debate_2017$speaker_name == "Hugh Gaffney", "Party"] <- "Labour"
+debate_2017[debate_2017$speaker_name == "Hugh Gaffney", "Constituency"] <- "Coatbridge, Chryston and Bellshill"
+debate_2017[debate_2017$speaker_name == "Hugh Gaffney", "URI"] <- "https://www.theyworkforyou.com/mp/25660/hugh_gaffney/coatbridge%2C_chryston_and_bellshill"
+
+# Filling the missing data for Preet Kaur Gill
+debate_2017[debate_2017$speaker_name == "Preet Kaur Gill", "Party"] <- "Labour"
+debate_2017[debate_2017$speaker_name == "Preet Kaur Gill", "Constituency"] <- "Birmingham, Edgbaston"
+debate_2017[debate_2017$speaker_name == "Preet Kaur Gill", "URI"] <- "https://www.theyworkforyou.com/mp/25666/preet_kaur_gill/birmingham%2C_edgbaston"
+
+
+
+##### 2016 merged debate data #####  
+
+debate_2016 <- readDebateDir("~/Desktop/Dissertation/scrapedxml_2016/debates/")
+debate_2016 <- left_join(debate_2016, mp_party_2015, by = c("person_id" = "Person.ID")) # no missing data 
+debate_2016 <- subset(debate_2016, select = -c(First.name, Last.name))
+
+##### 2015 merged debate data ##### 
+
+debate_2015 <- readDebateDir("~/Desktop/Dissertation/scrapedxml_2015/debates/")
+
+# There are lots of missing MP ID in this dataset
+# Hence, I will use the MP names to merge my data 
+mp_party_2015$full_name <- paste(mp_party_2015$First.name, mp_party_2015$Last.name, sep = " ")
+
+# Merge between debate data and MP political party data
+debate_2015 <- left_join(debate_2015, mp_party_2015, by = c("speaker_name" = "full_name"))
+
+# Filling the missing data for Fiona O'Donnell
+debate_2015[debate_2015$speaker_name == "Fiona O'Donnell", "Person.ID"] <- "xxx"
+debate_2015[debate_2015$speaker_name == "Fiona O'Donnell", "Party"] <- "Labour"
+debate_2015[debate_2015$speaker_name == "Fiona O'Donnell", "Constituency"] <- "East Lothian"
+debate_2015[debate_2015$speaker_name == "Fiona O'Donnell", "URI"] <- "https://www.theyworkforyou.com/mp/24723/fiona_o%27donnell/east_lothian"
+
+# Filling the missing data for Douglas Alexander
+debate_2015[debate_2015$speaker_name == "Douglas Alexander", "Person.ID"] <- "10661"
+debate_2015[debate_2015$speaker_name == "Douglas Alexander", "Party"] <- "Labour"
+debate_2015[debate_2015$speaker_name == "Douglas Alexander", "Constituency"] <- "Paisley and Renfrewshire South"
+debate_2015[debate_2015$speaker_name == "Douglas Alexander", "URI"] <- "https://www.theyworkforyou.com/mp/10661/douglas_alexander/paisley_and_renfrewshire_south"
+
+# Filling the missing data for Hugh Robertson
+debate_2015[debate_2015$speaker_name == "Hugh Robertson", "Person.ID"] <- "11190"
+debate_2015[debate_2015$speaker_name == "Hugh Robertson", "Party"] <- "Conservative"
+debate_2015[debate_2015$speaker_name == "Hugh Robertson", "Constituency"] <- "Faversham and Mid Kent"
+debate_2015[debate_2015$speaker_name == "Hugh Robertson", "URI"] <- "https://www.theyworkforyou.com/mp/11190/hugh_robertson/faversham_and_mid_kent"
+
+# Filling the missing data for Frank Roy
+debate_2015[debate_2015$speaker_name == "Frank Roy", "Person.ID"] <- "10517"
+debate_2015[debate_2015$speaker_name == "Frank Roy", "Party"] <- "Labour"
+debate_2015[debate_2015$speaker_name == "Frank Roy", "Constituency"] <- "Motherwell and Wishaw"
+debate_2015[debate_2015$speaker_name == "Frank Roy", "URI"] <- "https://www.theyworkforyou.com/mp/10517/frank_roy/motherwell_and_wishaw"
+
+# Filling the missing data for Menzies Campbell
+debate_2015[debate_2015$speaker_name == "Menzies Campbell", "Person.ID"] <- "10088"
+debate_2015[debate_2015$speaker_name == "Menzies Campbell", "Party"] <- "Liberal Democrat"
+debate_2015[debate_2015$speaker_name == "Menzies Campbell", "Constituency"] <- "North East Fife"
+debate_2015[debate_2015$speaker_name == "Menzies Campbell", "URI"] <- "https://www.theyworkforyou.com/mp/10088/menzies_campbell/north_east_fife"
+
+# Filling the missing data for Michael Penning
+debate_2015[debate_2015$speaker_name == "Michael Penning", "Person.ID"] <- "11626"
+debate_2015[debate_2015$speaker_name == "Michael Penning", "Party"] <- "Conservative"
+debate_2015[debate_2015$speaker_name == "Michael Penning", "Constituency"] <- "Hemel Hempstead"
+debate_2015[debate_2015$speaker_name == "Michael Penning", "URI"] <- "https://www.theyworkforyou.com/mp/11626/mike_penning/hemel_hempstead"
+
+# Filling the missing data for Diana Johnson
+debate_2015[debate_2015$speaker_name == "Diana Johnson", "Person.ID"] <- "11647"
+debate_2015[debate_2015$speaker_name == "Diana Johnson", "Party"] <- "Labour"
+debate_2015[debate_2015$speaker_name == "Diana Johnson", "Constituency"] <- "Kingston upon Hull North"
+debate_2015[debate_2015$speaker_name == "Diana Johnson", "URI"] <- "https://www.theyworkforyou.com/mp/11647/diana_r._johnson/kingston_upon_hull_north"
+
+# Filling the missing data for Sarah Teather
+debate_2015[debate_2015$speaker_name == "Sarah Teather", "Person.ID"] <- "11350"
+debate_2015[debate_2015$speaker_name == "Sarah Teather", "Party"] <- "Liberal Democrat"
+debate_2015[debate_2015$speaker_name == "Sarah Teather", "Constituency"] <- "Brent Central"
+debate_2015[debate_2015$speaker_name == "Sarah Teather", "URI"] <- "https://www.theyworkforyou.com/mp/11350/sarah_teather/brent_central"
+
+# Filling the missing data for Tony Baldry
+debate_2015[debate_2015$speaker_name == "Tony Baldry", "Person.ID"] <- "10023"
+debate_2015[debate_2015$speaker_name == "Tony Baldry", "Party"] <- "Conservative"
+debate_2015[debate_2015$speaker_name == "Tony Baldry", "Constituency"] <- "Banbury"
+debate_2015[debate_2015$speaker_name == "Tony Baldry", "URI"] <- "https://www.theyworkforyou.com/mp/10023/tony_baldry/banbury"
+
+# Re-formatting debate_2015 to standardize the data frame 
+debate_2015 <- subset(debate_2015, select = -c(First.name, Last.name))
+debate_2015$person_id <- debate_2015$Person.ID
+debate_2015 <- subset(debate_2015, select = -c(Person.ID))
+
+# Merging completed dataset from 2015 to 2022
+debate_dataset <- rbind(debate_2015, debate_2016, debate_2017, debate_2018, 
+                        debate_2019, debate_2020, debate_2021, debate_2022, debate_2023)
+nrow(debate_dataset)  # number of speeches before cleaning: 9763
+```
+
+5) Cleaning Dataset and Saving as a CSV file 
+```{r 5}
+
+# Removing special characters in the dataset due to encoding issues
+debate_dataset$speech_text <- gsub("€", "", debate_dataset$speech_text)
+debate_dataset$speech_text <- gsub("™", "", debate_dataset$speech_text)
+debate_dataset$speech_text <- gsub("â", "", debate_dataset$speech_text)
+debate_dataset$speech_text <- gsub("£", "", debate_dataset$speech_text)
+debate_dataset$speech_text <- gsub("©", "", debate_dataset$speech_text)
+debate_dataset$speech_text <- gsub("Ã", "", debate_dataset$speech_text)
+debate_dataset$speech_text <- gsub("œ", "", debate_dataset$speech_text)
+debate_dataset$speech_text <- gsub("Â", "", debate_dataset$speech_text)
+
+# Removing debates about international student migration, economic migrants, and other irrelevant debate topics
+debate_dataset <- subset(debate_dataset, !grepl("international students|tertiary education|student|economic migrants|NHS|migration target|seasonal migrant|agriculture|social care staff|EU migrant|US IMMIGRATION|Spouse Visas|Effect on the Economy|immigration white paper|Net Migration|scotland|Maternity Outcomes|Universal Credit|Sharing of Data|British National (Overseas) Immigration|Health Surcharge Exemption|Points-based|Unskilled Migration|Skilled Workers|Immigration and Nationality: Fees|Chief Inspector of Borders|UK Visas and Immigration|Immigration: Scottish Economy|British Armed Forces Interpreters|Migrant Workers", 
+                                                debate_title, 
+                                                ignore.case = TRUE))
+
+# Removing irrelavant speeches
+debate_dataset <- subset(debate_dataset, !grepl("uk.org.publicwhip/debate/2017-01-18a|
+uk.org.publicwhip/debate/2019-06-10b.391.0|uk.org.publicwhip/debate/2015-10-13a.208.5|
+uk.org.publicwhip/debate/2019-01-28b.507.7|uk.org.publicwhip/debate/2019-01-28b.508.0|
+uk.org.publicwhip/debate/2019-01-28b.508.2|uk.org.publicwhip/debate/2019-01-28b.508.5|
+uk.org.publicwhip/debate/2019-01-28b.509.2|uk.org.publicwhip/debate/2019-01-28b.559.0|	
+uk.org.publicwhip/debate/2019-06-10b.391.1|uk.org.publicwhip/debate/2019-06-26a.682.0|
+uk.org.publicwhip/debate/2019-06-26a.683.0|uk.org.publicwhip/debate/2019-06-26a.683.1|
+uk.org.publicwhip/debate/2015-02-04b.259.0",
+                                                speech_id, ignore.case = TRUE))
+
+
+# Removing speeches by the Speaker of the House of Commons
+debate_dataset <- subset(debate_dataset, !grepl("Speaker", 
+                                                Party, 
+                                                ignore.case = TRUE))
+
+debate_dataset <- subset(debate_dataset, !grepl("Hon. Members", 
+                                                speaker_name, 
+                                                ignore.case = TRUE))
+
+# Removing speeches with less than 30 words
+library(stringr)
+debate_dataset <- debate_dataset %>%
+  filter(str_count(speech_text, "\\S+") >= 30) 
+
+# Fixing Political Party Names 
+debate_dataset$Party <- ifelse(debate_dataset$Party == "Scottish National Party", "SNP",
+                               ifelse(debate_dataset$Party == "Social Democratic and Labour Party", "SDLP",
+                                      ifelse(debate_dataset$Party == "Liberal Democrat", "Liberal Democrats", debate_dataset$Party)))
+
+debate_dataset$Party <- ifelse(debate_dataset$Party == "Labour/Co-operative", 
+                               "Labour", debate_dataset$Party)
+
+
+# Removing empty rows with just bill titles 
+debate_dataset <- debate_dataset[!is.na(debate_dataset$Party), ]
+
+# Save as CSV
+write.csv(debate_dataset, "debate_dataset.csv", row.names = FALSE)
+nrow(debate_dataset) # Total Number of Speeches in Cleaned Dataset: 7368
+```
+
+## Descriptive Analysis
+
+1) Loading Libraries
+```{r b1}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(tidyr)
+```
+
+2) Temporal Distribution of Speeches
+```{r b2}
+debate_dataset$date <- as.Date(debate_dataset$date)
+
+debate_monthly <- debate_dataset %>%
+  mutate(month = floor_date(date, unit = "month")) %>%
+  group_by(month) %>%
+  summarise(total_count = n())
+
+ggplot(debate_monthly, aes(x = month, y = total_count)) +
+  geom_line(color = "black") +
+  labs(x = "Month", y = "Total Count") +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "6 months",
+               date_minor_breaks = "1 month",  
+               expand = c(0, 0),
+               limits = c(as.Date("2015-01-01"), max(debate_monthly$month))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+        axis.title = element_text(face = "bold"),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+```
+
+3) Contingency Table of Speeches (across parties and years)
+```{r b3}
+# Calculating the number of speeches across years
+debate_yearly <- debate_dataset %>%
+  mutate(year = floor_date(date, unit = "year")) %>%
+  group_by(year) %>%
+  summarise(total_count = n())
+
+# Calculating the number of speeches across political parties
+debate_party <- debate_dataset %>%
+  group_by(Party) %>%
+  summarise(total_count = n())
+
+# Calculating the number of speeches across years and political parties 
+debate_yearly_party <- debate_dataset %>%
+  mutate(year = floor_date(date, unit = "year")) %>%
+  group_by(year, Party) %>%
+  summarise(total_count = n())
+
+# Printing results
+contingency_table <- debate_yearly_party %>%
+  pivot_wider(names_from = Party, values_from = total_count, values_fill = 0)
+print(contingency_table) 
+
+```
+
+4) Number of Words Per Speech
+
+```{r b4}
+library(stringr)
+
+# Create a new column "word_count" in your dataset
+debate_dataset$word_count <- str_count(debate_dataset$speech_text, "\\b\\w+\\b")
+
+# Display the word count for each row (before text cleaning)
+summary(debate_dataset$word_count)
+tapply(debate_dataset$word_count, 
+       debate_dataset$Party, 
+       mean, na.rm = TRUE)
+```
+
+5) Geographic Disparities
+
+```{r b5}
+# Calculating the number of speeches per MP
+debate_constituency <- debate_dataset %>%
+  group_by(Constituency) %>%
+  summarise(total_count = n())
+
+con_to_la <- read.csv("constituency-to-la.csv")
+con_and_la <- merge(debate_constituency, con_to_la, 
+                    by.x = "Constituency", by.y = "PCON22NM") %>%
+  distinct(Constituency, .keep_all = TRUE)
+
+library(sf)
+shapefile <- st_read("shapefile/PCON_DEC_2021_UK_BFE.shp")
+
+region_shapefile <- st_read("NUTS_Level_1/NUTS_Level_1_January_2018_FCB_in_the_United_Kingdom.shp")
+region_sh <- st_simplify(region_shapefile, preserveTopology = TRUE, dTolerance = 1000)
+
+MERGED_SHAPEFILE <- merge(shapefile, 
+                          debate_constituency, 
+                          by.x = "PCON21NM", 
+                          by.y = "Constituency", 
+                          all.x = TRUE)
+
+t <- st_simplify(MERGED_SHAPEFILE, preserveTopology = TRUE, dTolerance = 1000)
+
+library(tmap)
+
+tm_shape(t) +
+  tm_fill(title = "Count", 
+          palette = c("#eff3ff","#bdd7e7","#6baed6","#3182bd","#08519c"), 
+          fill = "total_count",
+          border.alpha = 0.9,
+          midpoint = NA,
+          breaks = c(1, 4, 10, 50, 100, 400)) +  
+  tm_borders(lwd = 0.01) +
+  tm_shape(region_sh) +
+  tm_borders(col="#252525", lwd=1.1) +
+  tm_layout(legend.outside = TRUE,
+            legend.position = c("left", "top"),
+            legend.title.fontface = "bold",
+            legend.frame = FALSE,
+            legend.title.size = 1,
+            frame = FALSE) +
+  tm_compass(type = "arrow",
+             position = c("right", "bottom")) 
+  
+
+region_shapefile <- st_read("NUTS_Level_1/NUTS_Level_1_January_2018_FCB_in_the_United_Kingdom.shp")
+london <- region_shapefile[region_shapefile$nuts118nm %in% "London", ]
+london_outline <- london %>% st_union()
+t <- st_simplify(MERGED_SHAPEFILE, preserveTopology = TRUE, dTolerance = 100)
+
+london <- t %>%
+  st_intersection(london_outline)
+
+tm_shape(london) +
+  tm_fill(title = "Mean Estimate", 
+          palette = c("#eff3ff","#bdd7e7","#6baed6","#3182bd","#08519c"), 
+          fill = "total_count",
+          border.alpha = 0.1,
+          midpoint = NA,
+          breaks = c(1, 4, 10, 50, 100, 400)) +  
+  
+  tm_borders(lwd = 0.1)+
+  tm_shape(london_outline) +
+  tm_borders(col="#252525", lwd=1.2)
+```
+
+## Creating a Document-Feature Matrix
+
+1) Load Libraries
+```{r c1}
+library(tidyverse)
+library(quanteda)
+library(quanteda.textstats)
+```
+
+2) Creating a text corpus and DFM
+```{r c2}
+# Create corpus
+SpeechCorpus <- corpus(debate_dataset$speech_text, docvars = debate_dataset) 
+
+# Creating customn stop words to remove ceremonial language
+custom_stopwords <- c("hon", "rose—", "rose", "government", "minister", 
+                      "gentleman", "speaker", "mr","home","secretary",
+                      "friend","right","<",">","can","lady","people","make")
+
+# Text cleaning 
+cleaned_tokens <- SpeechCorpus %>%
+  tokens(remove_numbers = T, # removing numbers
+         remove_punct = T) %>% # removing punctuations
+  tokens_remove(stopwords("en")) %>% # removing common stopwords
+  tokens_remove(custom_stopwords) %>% # removing custom stopwords
+  tokens_wordstem() %>% 
+  tokens_tolower()
+
+# Creating a document feature matrix
+dfm <- cleaned_tokens %>% 
+  dfm(tolower=T) %>% # dfm, lowercase
+  dfm_trim(min_docfreq = 5) %>% # remove words appearing 5 times or fewer
+  dfm_weight(scheme="prop")
+
+dfm_count <- cleaned_tokens %>% 
+  dfm(tolower=T) %>% # dfm, lowercase
+  dfm_trim(min_docfreq = 5) 
+
+# Calculate the mean number of features per document for each political party
+
+library(Matrix)
+library(sjmisc)
+
+terms_per_doc <- rowSums(as.matrix(dfm_count))
+summary(terms_per_doc)
+
+# Calculate the mean number of features per document for each political party
+num_terms <- data.frame(Party = cleaned_tokens$Party, 
+                        TermsPerDoc = rowSums(as.matrix(dfm_count)))
+num_terms %>%
+  group_by(Party) %>%
+  summarise(mean = mean(TermsPerDoc),
+            min = min(TermsPerDoc),
+            max = max(TermsPerDoc))
+
+
+```
+
+## Partisan Analysis
+
+1) Load Libraries
+```{r d1}
+library(cowplot)
+```
+
+2) Create DFM by TF-IDF Weighting
+```{r d1}
+# Remove minor political parties with insufficient number of speeches
+excluded_parties <- c("UUP", "Alba", "UKIP", "SDLP", 
+                      "Green", "Independent","Plaid Cymru","Alliance","DUP")
+SpeechCorpus_filtered <- SpeechCorpus[!SpeechCorpus$Party %in% excluded_parties, ]
+
+# TF-IDF 
+dfm_tfidf <- SpeechCorpus_filtered %>% 
+  tokens(remove_numbers=T, # remove numbers
+         remove_punct=T) %>% # remove punctuation
+  tokens_remove(stopwords("en")) %>% # remove stopwords
+  tokens_remove(custom_stopwords) %>% # remove custom stopwords
+  tokens_wordstem() %>% 
+  dfm(tolower=T) %>% # dfm
+  dfm_trim(min_docfreq = 5) %>% # remove words appearing 5 times or fewer
+  dfm_tfidf()
+
+# Top 10 words by Party
+comparison <- textstat_frequency(dfm_tfidf,10,groups=Party,force=TRUE)
+```
+
+3) Plotting Results
+```{r d2}
+party_names <- c("Conservative","Labour", "Liberal Democrats","SNP")
+
+party_colors <- c("Conservative" = "#239ade","Labour" = "#c7223a",
+  "Liberal Democrats" = "#feb01f", "SNP" = "#8B8000")
+
+# Create a list to store the plots
+plots <- list()
+
+# Loop through each party and create a plot
+for (party in party_names) {
+  p <- ggplot(comparison[comparison$group == party, ],
+              aes(x = frequency,
+                  y = reorder(feature, frequency))) +
+    geom_point(color = party_colors[party]) +  
+    ylab("") +
+    xlab("Frequency (TF−IDF weighted)") +
+    ggtitle(party) +
+    theme(plot.title = element_text(size = 12, face = "bold"),
+          axis.text.y = element_text(size = 10, face = "italic"),
+          axis.title.x = element_text(size = 10, face = "italic"))
+  
+  plots[[party]] <- p
+}
+
+# Arrange the plots using plot_grid 
+plot_grid(plotlist = plots, ncol = 2)
+```
+
+## Wordscore
+
+1) Load Libraries
+```{r e1}
+library(quanteda)
+library(quanteda.textmodels)
+library(foreign)
+library(haven)
+library(lme4)
+library(dplyr)
+library(stringr)
+```
+
+2) Aggregate Data by MP
+```{r e2}
+# Group dataset by MP (speaker_name)
+mp_dataset <- debate_dataset %>%
+  group_by(speaker_name, Party) %>%
+  summarise(amalgamated_speech = paste(speech_text, collapse = " "), 
+            .groups = "drop") %>%
+  mutate(word_count = str_count(amalgamated_speech, "\\S+"))%>%
+  filter(word_count >= 100)
+mp_dataset <- subset(mp_dataset, select = -c(word_count))
+
+# Number of MPs: 549 
+nrow(mp_dataset) 
+
+```
+
+3) Create Reference Documents 
+```{r e3}
+# Creating a reference document 
+# (1) "Anti-refugee" reference document
+
+priti <- debate_dataset %>%
+  filter(speaker_name == "Priti Patel") %>%
+  select(speech_text)
+
+suella <- debate_dataset %>%
+  filter(speaker_name == "Suella Braverman") %>%
+  select(speech_text)
+
+ref1_speech <- paste(suella$speech_text, priti$speech_text, collapse = " ")
+
+# (2) "Pro-refugee" reference document
+ref2_data <- mp_dataset %>%
+  filter(speaker_name %in% c("Diana Abbot", "Tahir Ali","Sam Tarry", "Richard Burgon",
+                             "Paula Barker", "Rebecca Long-Bailey", "Rachel Hopkins",
+                             "Rachael Maskell", "Paula Barker","	Olivia Blake",
+                             "Navendu Mishra", "Nadia Whittome","Mick Whitley",
+                             "Mary Foy", "Marsha de Cordova", "Lloyd Russell-Moyle",
+                             "Kim Johnson", "Kate Osborne", "Kate Osamor",
+                             "Jon Trickett", "John McDonnell", "Jeremy Corbyn",
+                             "Imran Hussain", "Ian Mearns", "	Ian Lavery",
+                             "Ian Byrne", "Grahame Morris", "Zarah Sultana",
+                             "Dawn Butler", "Dan Carden", "Clive Lewis",
+                             "Claudia Webbe", "Beth Winter", "Bell Ribeiro-Addy",
+                             "Apsana Begum", "Andy McDonald"))
+
+ref2_speech <- paste(ref2_data$amalgamated_speech, collapse = " ")
+
+# Adding reference documents
+mp_dataset$ref <- NA
+mp_dataset[550,] <- list("ref1", NA, NA, 5)
+mp_dataset[551,] <- list("ref2", NA, NA, -5)
+mp_dataset[550,3] <- ref1_speech
+mp_dataset[551,3] <- ref2_speech
+```
+
+4) Create a Text Corpus with Updated Document Metadocument
+```{r e4}
+# Create text corpus
+SpeechCorpusMP <- corpus(mp_dataset$amalgamated_speech, docvars = mp_dataset) 
+
+custom_stopwords <- c("hon", "rose—", "rose", "government", "minister", 
+                      "gentleman", "speaker", "mr","friend","home","secretary",
+                      "friend","right","<",">","can","lady","lady’","people","yes")
+
+# Creating a dfm
+dfm_mp <- SpeechCorpusMP %>% 
+  tokens(remove_numbers=T, # remove numbers
+         remove_punct=T) %>% # remove punctuation
+  tokens_remove(stopwords("en")) %>% # remove stopwords
+  tokens_remove(custom_stopwords) %>% # remove custom stopwords
+  tokens_wordstem() %>% 
+  dfm(tolower=T) %>% # dfm, lowercase
+  dfm_trim(min_docfreq = 5) # remove words appearing 2 times or fewer
+
+# Setting metadoc
+docvars(dfm_mp) <- mp_dataset
+```
+
+5) Estimating Wordscore
+```{r e5}
+# estimate wordscores from reference documents
+mod_ws <- textmodel_wordscores(dfm_mp, 
+                               y = docvars(dfm_mp, "ref"), 
+                               smooth=1)
+
+# score the virgin documents, with standard errors
+pred_ws <- predict(mod_ws, se.fit = TRUE, newdata = dfm_mp)
+results <- as.data.frame(cbind(pred_ws[[1]],pred_ws[[2]]))
+
+# adding MP name and Party
+results$MP <- mp_dataset$speaker_name
+results$Party <- mp_dataset$Party
+names(results) <- c("est","se","MP","Party")
+
+# adding confidence interval
+results$conf_up <- results$est+1.96*results$se
+results$conf_down <- results$est-1.96*results$se
+
+# Remove reference docs
+results <- results[results$MP != "ref2" & results$MP != "ref1", ]
+
+# Observing Top 10 Words
+head(sort(mod_ws[["wordscores"]], decreasing = TRUE), 10)
+head(sort(mod_ws[["wordscores"]]), 10)
+```
+
+6) Creating a Multiple Regression Model Using Biographical MP Data 
+```{r e6}
+
+# Biographical data
+biodata2015 <- read_sav("MPs2015.sav")
+biodata2017 <- read_sav("MPs2017.sav")
+biodata2019 <- read_sav("MPs2019.sav")
+
+# Reformatting Names - Standerdising Naming Format
+biodata2015$name <- sub("(.+), (.+)", "\\2 \\1", biodata2015$name)
+biodata2015 <- biodata2015 %>%
+  mutate(name = gsub(" [A-Z][a-z]* ", " ", name)) # Remove middle names
+
+biodata2017$name <- sub("(.+), (.+)", "\\2 \\1", biodata2015$name)
+biodata2017 <- biodata2017 %>%
+  mutate(name = gsub(" [A-Z][a-z]* ", " ", name))
+
+biodata2019$name <- paste(biodata2019$firstname, biodata2019$surname, sep = " ")
+biodata2019 <- biodata2019 %>%
+  mutate(name = gsub(" [A-Z][a-z]* ", " ", name))
+
+# Turn age into year of birth for 2015
+biodata2015$yob <- 2015 - biodata2015$age
+
+# Cleaning Data 
+biodata2015 <- biodata2015[, c("name", "gender", "bme", "yob")]
+biodata2015 <- biodata2015 %>%
+  mutate(
+    gender = gsub("\\[.*?\\]", "", gender),
+    bme = gsub("\\[.*?\\]", "", bme))
+
+biodata2017 <- biodata2017[, c("name", "gender", "bme", "yob")]
+biodata2017 <- biodata2017 %>%
+  mutate(gender = gsub("\\[.*?\\]", "", gender),
+         bme = gsub("\\[.*?\\]", "", bme))
+
+biodata2019 <- biodata2019[, c("name", "gender", "BAME", "yob")]
+biodata2019 <- biodata2019 %>%
+  mutate(
+    gender = gsub("\\[.*?\\]", "", gender),
+    BAME = gsub("\\[.*?\\]", "", BAME))
+colnames(biodata2019) <- c("name", "gender", "bme", "yob")
+
+# Standerdising measures
+# Convert "2" to "1" and "1" to "0" in biodata2019$gender
+biodata2019$gender <- ifelse(biodata2019$gender == "2", "1", "0")
+# Convert "2" to "1" and "1" to "0" in biodata2019$bme
+biodata2019$bme <- ifelse(biodata2019$bme == "2", "1", "0")
+
+# Create a new data frame with selected columns
+biodata <- bind_rows(biodata2019, biodata2015, biodata2017)
+biodata <- distinct(biodata, name, .keep_all = TRUE)
+
+# Standerdise the names - same name as the debate dataset
+updated_names <- c(
+  "Mohammed Khan" = "Afzal Khan",
+  "Michael Burghart" = "Alex Burghart",
+  "Andy Slaughter" = "Andrew Slaughter",
+  "Annalissa Firth" = "Anna Firth",
+  "Charles Elphicke" = "Charlie Elphicke",
+  "Cheryl Gillan" = "Dame Gillan",
+  "Diana Johnson" = "Diana R. Johnson",
+  "John Carswell" = "Douglas Carswell",
+  "Caroline Johnson" = "Dr Johnson",
+  "Timothy Loughton" = "Tim Loughton",
+  "Robert Flello" = "Rob Flello",
+  "Simon James Fell" = "Simon Fell",
+  "Simon Maurice Baynes" = "Simon Baynes",
+  "Nick Fletcher" = "Nicholas Fletcher",
+  "Neil Hammerton Hudson" = "Neil Hudson",
+  "James Hanvey" = "Neale Hanvey",
+  "Liz Roberts" = "Liz Saville-Roberts",
+  "Kenneth MacAskill" = "Kenny MacAskill",
+  "David Edwards" ="Jonathan Edwards",
+  "Jonathan Ashworth" = "Jon Ashworth",
+  "Jerome Burke Mayhew" = "Jerome Mayhew",
+  "Jane Catherine Stevenson" = "Jane Stevenson",
+  "Michael Ellwood Berry" = "James Berry"
+)
+
+# Apply the name mapping to the 'name' column in biodata
+for (old_name in names(updated_names)) {
+  new_name <- updated_names[old_name]
+  biodata$name <- gsub(old_name, new_name, biodata$name)
+}
+
+# Adding biographical dataset
+results <- results %>%
+  mutate(MP = gsub(" [A-Z][a-z]* ", " ", MP))
+results <- merge(results, biodata, by.x = "MP", by.y = "name", all.x=TRUE)
+
+# Filling missing data (new MPs not in the dataset)
+missing_data <- read.csv("Filling Missing Data.csv")
+
+# Replace missing values in "gender," "bme," and "yob" columns using values from "missing_data"
+results$gender <- ifelse(is.na(results$gender), missing_data$gender[match(results$MP, missing_data$MP)], results$gender)
+results$bme <- ifelse(is.na(results$bme), missing_data$bme[match(results$MP, missing_data$MP)], results$bme)
+results$yob <- ifelse(is.na(results$yob), missing_data$yob[match(results$MP, missing_data$MP)], results$yob)
+
+# Group minor parties together
+results$Party <- ifelse(results$Party %in% c("Green", "Independent", "DUP", "SDLP", "UKIP", "Plaid Cymru", "Alliance", "Alba"), "Other", results$Party)
+
+# Adding constituency-region data to results
+# retriving constituency data 
+mp_party$full_name <- paste(mp_party$First.name, 
+                            mp_party$Last.name, sep = " ")
+mp_party_2017$full_name <- paste(mp_party_2017$First.name,
+                                 mp_party_2017$Last.name, sep = " ")
+mp_party_2015$full_name <- paste(mp_party_2015$First.name,
+                                 mp_party_2015$Last.name, sep = " ")
+mp_region <- bind_rows(mp_party, mp_party_2017, mp_party_2015)
+mp_region <- mp_region %>%
+  select(full_name, Constituency)
+
+# converting from constituency to region
+region <- read.csv("constituency-region.csv")
+region <- merge(mp_region, region, by.x = "Constituency", by.y = "constituency")
+region <- region %>%
+  select(full_name, region) %>%
+  unique()
+
+# merging region data with wordscore results
+full_results <- merge(results, region, by.x = "MP", by.y = "full_name", all.x = TRUE) 
+
+# filling missing data 
+manually_entered <- data.frame(
+  MP = c("Dame Gillan", "Douglas Alexander", "Dr Johnson", 
+         "Iain Smith", "John McDonnell", "Michael Penning", 
+         "Preet Gill", "Sarah Teather", "Tanmanjeet Dhesi"),
+  region = c("South East", "Scotland", "East Midlands", 
+             "London", "London", "North West", 
+             "West Midlands", "London", "South East"))
+
+full_results <- merge(full_results, manually_entered, by = "MP", all.x = TRUE)
+full_results <- full_results %>%
+  left_join(manually_entered, by = c("MP" = "MP")) %>%
+  mutate(region = coalesce(region.x, region.y)) %>%
+  select(-region.x, -region.y)
+
+full_results$region <- gsub("North East|North West|Yorkshire & the Humber", "North", full_results$region)
+full_results$region <- gsub("South East|South West|Eastern", "South", full_results$region)
+full_results$region <- gsub("West Midlands|East Midlands", "Midlands", full_results$region)
+
+# Reorder results 
+full_results <- full_results[order(full_results$est), ]
+full_results$region <- factor(full_results$region)
+full_results$region <- relevel(full_results$region, ref = "London")
+
+# Printing regression results
+model <- lm(est ~ Party + gender + bme + yob + region, data = full_results)
+summary(model)
+```
+
+6) Visualising Results (Major Political Parties)
+```{r e6}
+# grouping by political party (excluding parties with less than 10 MP contribution)
+major_party <- results %>% 
+  group_by(Party) %>%
+  summarise(avg_est = mean(est),
+            se = sd(est) / sqrt(n()))%>%
+  filter(Party %in% c("Labour","Liberal Democrats","SNP","Conservative")) %>%
+  arrange(avg_est)
+
+# adding confidence intervals
+major_party$conf_up <- major_party$avg_est+1.96*major_party$se
+major_party$conf_down <- major_party$avg_est-1.96*major_party$se
+
+# plotting by major political party
+library(ggplot2)
+
+party_colors <- c(
+  "Conservative" = "#239ade",
+  "Labour" = "#c7223a",
+  "Liberal Democrats" = "#feb01f",
+  "DUP" = "darkblue",
+  "SNP" = "#8B8000"
+)
+
+ggplot(major_party, aes(y = Party, x = avg_est)) +
+  geom_errorbarh(aes(xmin = conf_up, xmax = conf_down,colour = Party), 
+                 height = .1) +
+  geom_point(aes(fill = Party), size = 2, shape = 21) + 
+  scale_fill_manual(values = party_colors) +
+  scale_color_manual(values = party_colors) +
+  scale_y_discrete(name = "", limits = c(major_party$Party)) +
+  xlab("Estimated Ideological Position")+
+  theme(axis.text.x = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold.italic"),
+        axis.title = element_text(face = "bold",size=10),
+        legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "bold"))
+```
+
+7) Visualising Results (Conservative Party)
+```{r e7}
+conservative <- results[results$Party=="Conservative",]
+
+# Highest contributing Conservative MPs
+table(debate_dataset$speaker_name[debate_dataset$Party=="Conservative"])
+ 
+selected_conMP <- c("Robert Jenrick","Suella Braverman","Priti Patel",
+                    "James Brokenshire","Chris Philp", "Sajid Javid", 
+                    "Kevin Foster","Tom Pursglove","Amber Rudd", 
+                    "Theresa May","Robert Goodwill", "David Cameron",
+                    "Rishi Sunak","Robin Walker", "Fiona Bruce")
+
+selected_con <- subset(conservative, MP %in% selected_conMP) %>%
+  arrange(est)
+
+ggplot(selected_con, aes(y = MP, x = est)) +
+  geom_errorbarh(aes(xmin = conf_up, xmax = conf_down), 
+                 height = .1,color="darkblue") +
+  geom_point(size = 2,color="darkblue") + 
+  scale_y_discrete(name = "", limits = c(selected_con$MP)) +
+  xlab("Estimated Ideological Position") +
+  theme(axis.text.x = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold.italic"),
+        axis.title = element_text(face = "bold"))
+```
+
+8) Visualising Results (Labour Party)
+```{r e8}
+# plotting within parties, with MPs making the biggest contributions
+labour <- results[results$Party=="Labour",]
+
+# Most contributing Labour MPs
+View(table(debate_dataset$speaker_name[debate_dataset$Party=="Labour"]))
+
+selected_labMP <- c("Yvette Cooper","Diane Abbott","Stephen Kinnock","Diana R. Johnson","Stella Creasy", "Andrew Slaughter", "Thangam Debbonaire","Andy Burnham","Keir Starmer","Afzal Khan", "Keith Vaz","Paul Blomfield", "Imran Hussain","Zarah Sultana","Derek Twigg")
+
+# Filter the 'labour' dataset to select only the desired MPs
+selected_labour <- subset(labour, MP %in% selected_labMP) %>%
+  arrange(est)
+
+ggplot(selected_labour, aes(y = MP, x = est)) +
+  geom_errorbarh(aes(xmin = conf_up, xmax = conf_down), 
+                 height = .1, color = "darkred") +
+  geom_point(size = 2, color = "darkred") + 
+  scale_y_discrete(name = "", limits = c(selected_labour$MP)) +
+  xlab("Estimated Ideological Position") +
+  theme(axis.text.x = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold.italic"),
+        axis.title = element_text(face = "bold"))
+```
+
+## Stratified Sampling for Document Classification
+
+1) Sampling 600 speeches for labelling
+```{r f1}
+# Perform stratified sampling
+party_data <- data.frame(
+  Party = c("Alliance", "Conservative", "DUP", "Green", "Independent", "Labour", "Liberal Democrats", "Plaid Cymru", "SDLP", "SNP"),
+  Num_Speeches = c(1, 385, 6, 2, 3, 123, 14, 2, 1, 63)
+)
+
+# Loop through each party and sample speeches based on the specified number
+sampled_speeches <- data.frame()
+set.seed(1) 
+for (i in 1:nrow(party_data)) {
+  party <- party_data$Party[i]
+  num_speeches <- party_data$Num_Speeches[i]
+  
+  # Sample speeches for the current party from the dataset
+  sampled_party_speeches <- debate_dataset %>%
+    filter(Party == party) %>%
+    sample_n(size = num_speeches, replace = FALSE)
+  
+  # Append the sampled speeches to the final dataset
+  sampled_speeches <- bind_rows(sampled_speeches, sampled_party_speeches)
+}
+
+library(writexl) # Export as a xlsx format for manual labelling
+write_xlsx(sampled_speeches, "stratified_sampled_speeches.xlsx")
+```
+
+2a) Constructing a Dictionary-Based Classifier
+```{r f2 dictionary}
+prelabeled <- read.csv("SAMPLED_SPEECHES.csv")
+SpeechCorpus <- corpus(prelabeled$speech_text, docvars = prelabeled) 
+
+cleaned_tokens <- SpeechCorpus %>%
+  tokens(remove_numbers = T, 
+         remove_punct = T) %>% 
+  tokens_remove(stopwords("en")) %>% 
+  tokens_remove(custom_stopwords) %>% 
+  tokens_tolower()
+
+# Creating a document feature matrix
+dfm <- cleaned_tokens %>% 
+  dfm(tolower=T) %>% 
+  dfm_trim(min_docfreq = 5) %>% 
+  dfm_weight(scheme="prop")
+
+# create a list of words for hostile speeches
+host.words <- c("illegal","illegally","offend","border","control","genuine",
+               "model","system","deport","point","detention","migrant", 
+               "bogus","issue","citizens")
+
+# create a list of words for hospitable speeches
+hosp.words <- c("welcome","safe","trauma","flee","visa","help",
+               "war","resettlement","support","brutal","hostile", 
+               "women", "children","vulnerable")
+
+# create and apply a dictionary
+mydict <- dictionary(list(hostility = host.words,
+                          hospitality = hosp.words))
+dfm_dict <- dfm %>% dfm_lookup(dictionary=mydict)
+
+# convert to data frame
+dfm_dict_df <- convert(dfm_dict, to="data.frame")
+
+# if hospitable words > hostile words, label as "more_positive"
+dfm_dict_df$more_positive <- ifelse(dfm_dict_df$hospitality>dfm_dict_df$hostility,2,1)
+table(prelabeled$doc_topics, dfm_dict_df$more_positive)
+360/600 # 60% accuracy
+```
+
+2b) Printing Document Classification Trends
+```{r f2-a}
+prelabeled <- read.csv("SAMPLED_SPEECHES.csv")
+SpeechCorpus <- corpus(prelabeled$speech_text, docvars = prelabeled) 
+
+cleaned_tokens <- SpeechCorpus %>%
+  tokens(remove_numbers = T, 
+         remove_punct = T) %>% 
+  tokens_remove(stopwords("en")) %>% 
+  tokens_remove(custom_stopwords) %>% 
+  tokens_tolower()
+
+# Creating a document feature matrix
+dfm <- cleaned_tokens %>% 
+  dfm(tolower=T) %>% 
+  dfm_trim(min_docfreq = 5) %>% 
+  dfm_weight(scheme="prop")
+
+# create a list of words for hostile speeches
+host.words <- c("illegal","illegally","offend","border","control","genuine",
+               "model","system","deport","point","detention","migrant", 
+               "bogus","issue","citizens")
+
+# create a list of words for hospitable speeches
+hosp.words <- c("welcome","safe","trauma","flee","visa","help",
+               "war","resettlement","support","brutal","hostile", 
+               "women", "children","vulnerable")
+
+# create and apply a dictionary
+mydict <- dictionary(list(hostility = host.words,
+                          hospitality = hosp.words))
+dfm_dict <- dfm %>% dfm_lookup(dictionary=mydict)
+
+# convert to data frame
+dfm_dict_df <- convert(dfm_dict, to="data.frame")
+
+# if hospitable words > hostile words, label as "more_positive"
+dfm_dict_df$more_positive <- ifelse(dfm_dict_df$hospitality>dfm_dict_df$hostility,2,1)
+table(prelabeled$doc_topics, dfm_dict_df$more_positive)
+360/600 # 60% accuracy
+
+
+
+
+# Plotting Results From Python 
+labeled <- read.csv("fulldf_with_predictions.csv")
+topic1 <- labeled[labeled$predicted_label=="1",]
+topic2 <- labeled[labeled$predicted_label=="2",]
+nrow(topic1)
+nrow(topic2)
+
+topic1_data <- table(topic1$date)
+topic1_data <- as.data.frame(topic1_data)
+colnames(topic1_data) <- c("date", "count")
+topic1_data$date <- as.Date(topic1_data$date)
+
+topic1_monthly <- topic1_data %>%
+  mutate(month = floor_date(date, unit = "month")) %>%
+  group_by(month) %>%
+  summarise(total_count = sum(count))
+
+topic2_data <- table(topic2$date)
+topic2_data <- as.data.frame(topic2_data)
+colnames(topic2_data) <- c("date", "count")
+topic2_data$date <- as.Date(topic2_data$date)
+
+topic2_monthly <- topic2_data %>%
+  mutate(month = floor_date(date, unit = "month")) %>%
+  group_by(month) %>%
+  summarise(total_count = sum(count))
+
+# Combine data from both topics
+topic12_data <- bind_rows(topic1_monthly, topic2_monthly, .id = "topic")
+topic12_data$date <- as.Date(topic12_data$month)
+
+# Plotting
+colnames(topic12_data) <- c("Topic","month","total_count","date")
+topic12_data$Topic <- ifelse(topic12_data$Topic == "1", "Hostility", "Hospitality")
+topic12_data$Topic <- factor(topic12_data$Topic, levels = c("Hostility","Hospitality"))
+
+ggplot(topic12_data, aes(x = month, 
+                         y = total_count, 
+                         color = Topic)) +
+  geom_line(data = subset(topic12_data, Topic == "Hospitality"),
+                          alpha = 0.9, linewidth = 0.7) +
+  geom_line(data = subset(topic12_data, Topic == "Hostility"), 
+            linewidth = 0.7, alpha=0.6) + 
+  labs(x = "Month", 
+       y = "Total Count") +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "6 months",
+               date_minor_breaks = "1 month",  
+               expand = c(0, 0),
+               limits = c(as.Date("2015-01-01"), 
+                          max(debate_monthly$month))) +
+  scale_color_manual(values = c("Hostility" = "#DE3163", "Hospitality" = "#69BAFB")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+        axis.title = element_text(face = "bold"),
+        legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold"),
+        legend.position = c("right"), legend.box = "horizontal")
+```
+
+2c) Validating Model
+```{r f2-b}
+sampled <- read.csv("SAMPLED_SPEECHES_3.csv")
+sampled_labeled <- merge(labeled, sampled, by = "speech_id", all = FALSE)
+
+both1 <- sampled_labeled[sampled_labeled$doc_topics == 1 & sampled_labeled$predicted_label == 1, ]
+both2 <- sampled_labeled[sampled_labeled$doc_topics == 2 & sampled_labeled$predicted_label == 2, ]
+
+misclassified1 <- sampled_labeled[sampled_labeled$doc_topics == 1 & sampled_labeled$predicted_label == 2, ]
+misclassified2 <- sampled_labeled[sampled_labeled$doc_topics == 2 & sampled_labeled$predicted_label == 1, ]
+
+# Printing Correctly and Incorrectly Classified Speeches
+## both1$speech_text.x
+## both2$speech_text.x
+## misclassified1$speech_text.x
+## misclassified2$speech_text.x
+
+labeled <- read.csv("fulldf_with_predictions.csv")
+labeled$predicted_label <- as.character(labeled$predicted_label)
+
+SpeechCorpus_predicted <- corpus(labeled$speech_text, docvars = labeled) 
+SpeechCorpus_predicted <- SpeechCorpus_predicted[!SpeechCorpus_predicted$Party %in% excluded_parties, ]
+
+# TF-IDF 
+dfm_tfidf_pred <- SpeechCorpus_predicted %>% 
+  tokens(remove_numbers=T, # remove numbers
+         remove_punct=T) %>% # remove punctuation
+  tokens_remove(stopwords("en")) %>% # remove stopwords
+  tokens_remove(custom_stopwords) %>% # remove custom stopwords
+  tokens_wordstem() %>% 
+  dfm(tolower=T) %>% # dfm
+  dfm_trim(min_docfreq = 5) %>% # remove words appearing 5 times or fewer
+  dfm_tfidf()
+
+# Top 10 words by Party
+comparison2 <- textstat_frequency(dfm_tfidf_pred, 
+                   10, 
+                   groups=predicted_label,
+                   force=TRUE)
+
+library(ggplot2)
+library(gridExtra)
+
+# Convert predicted_label to character strings (if not already)
+comparison2 <- comparison2 %>% mutate(sentiment_group = ifelse(group == "1", "Hostility", "Hospitality"))
+
+hostility <- comparison2[comparison2$sentiment_group=="Hostility",]
+hospitality <- comparison2[comparison2$sentiment_group=="Hospitality",]
+
+plot_hostility <- ggplot(hostility, aes(x = frequency, 
+                                        y = reorder(feature, frequency), 
+                                        color = "#c7223a")) +
+    geom_point(show.legend = FALSE,color = "#c7223a") + 
+    ylab("") +
+    xlab("Frequency (TF−IDF weighted)") +
+    ggtitle(paste("Hostility")) +
+    theme(
+      plot.title = element_text(size = 12, face = "bold"),
+      axis.text.y = element_text(size = 10, face = "italic"),
+      axis.title.x = element_text(size = 10, face = "italic"))
+
+plot_hospitality <- ggplot(hospitality, aes(x = frequency, 
+                                            y = reorder(feature, frequency), 
+                                            color = "#239ade")) +
+    geom_point(show.legend = FALSE,color = "#239ade") + 
+    ylab("") +
+    xlab("Frequency (TF−IDF weighted)") +
+    ggtitle(paste("Hospitality")) +
+    theme(
+      plot.title = element_text(size = 12, face = "bold"),
+      axis.text.y = element_text(size = 10, face = "italic"),
+      axis.title.x = element_text(size = 10, face = "italic"))
+
+grid.arrange(plot_hostility,plot_hospitality , ncol = 2)
+```
+
+3) Temporal Trends of Conservative Party
+```{r f3}
+labeled_conservative <- labeled[labeled$Party=="Conservative",]
+
+con_topic1 <- labeled_conservative[labeled_conservative$predicted_label=="1",]
+con_topic1_data <- table(con_topic1$date)
+con_topic1_data <- as.data.frame(con_topic1_data)
+colnames(con_topic1_data) <- c("date", "count")
+con_topic1_data$date <- as.Date(con_topic1_data$date)
+
+con_topic1_monthly <- con_topic1_data %>%
+  mutate(month = floor_date(date, unit = "month")) %>%
+  group_by(month) %>%
+  summarise(total_count = sum(count))
+
+con_topic2 <- labeled_conservative[labeled_conservative$predicted_label=="2",]
+con_topic2_data <- table(con_topic2$date)
+con_topic2_data <- as.data.frame(con_topic2_data)
+colnames(con_topic2_data) <- c("date", "count")
+con_topic2_data$date <- as.Date(con_topic2_data$date)
+
+con_topic2_monthly <- con_topic2_data %>%
+  mutate(month = floor_date(date, unit = "month")) %>%
+  group_by(month) %>%
+  summarise(total_count = sum(count))
+
+# Combine data from both topics
+con_topic12_data <- bind_rows(con_topic1_monthly, con_topic2_monthly, .id = "topic")
+con_topic12_data$date <- as.Date(con_topic12_data$month)
+
+# Plotting
+colnames(con_topic12_data) <- c("Topic","month","total_count","date")
+con_topic12_data$Topic <- ifelse(con_topic12_data$Topic == "1", "Hostility", "Hospitality")
+con_topic12_data$Topic <- factor(con_topic12_data$Topic, levels = c("Hostility","Hospitality"))
+
+conplot <- ggplot(con_topic12_data, aes(x = month, 
+                         y = total_count, 
+                         color = Topic)) +
+  geom_line(data = subset(con_topic12_data, Topic == "Hospitality"), linewidth = 0.7, alpha=0.9) +
+  geom_line(data = subset(con_topic12_data, Topic == "Hostility"), linewidth = 0.7, alpha=0.9) + 
+  labs(title = "Conservative Party", 
+       x = "Month", 
+       y = "Total Count") +
+  geom_vline(xintercept = as.Date("2023-03-01"), linetype = "dashed", color = "black", alpha=0.8) +
+  geom_vline(xintercept = as.Date("2022-03-01"), linetype = "dashed", color = "black", alpha=0.8) +
+  geom_vline(xintercept = as.Date("2015-09-01"), linetype = "dashed", color = "black", alpha=0.8) +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "6 months",
+               date_minor_breaks = "1 month",  
+               expand = c(0, 0),
+               limits = c(as.Date("2015-01-01"), 
+                          max(debate_monthly$month))) +
+  scale_color_manual(values = c("Hostility" = "#DE3163", "Hospitality" = "#69BAFB")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+        legend.position = "none", 
+        plot.title = element_text(face = "bold"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold"))
+```
+
+4) Temporal Trends of Labour Party 
+```{r f4}
+labeled_opp <- labeled[labeled$Party==c("Labour","SNP","Liberal Democrats"),]
+
+opp_topic1 <- labeled_opp[labeled_opp$predicted_label=="1",]
+opp_topic1_data <- table(opp_topic1$date)
+opp_topic1_data <- as.data.frame(opp_topic1_data)
+colnames(opp_topic1_data) <- c("date", "count")
+opp_topic1_data$date <- as.Date(opp_topic1_data$date)
+
+opp_topic1_monthly <- opp_topic1_data %>%
+  mutate(month = floor_date(date, unit = "month")) %>%
+  group_by(month) %>%
+  summarise(total_count = sum(count))
+
+opp_topic2 <- labeled_opp[labeled_opp$predicted_label=="2",]
+opp_topic2_data <- table(opp_topic2$date)
+opp_topic2_data <- as.data.frame(opp_topic2_data)
+colnames(opp_topic2_data) <- c("date", "count")
+opp_topic2_data$date <- as.Date(opp_topic2_data$date)
+
+opp_topic2_monthly <- opp_topic2_data %>%
+  mutate(month = floor_date(date, unit = "month")) %>%
+  group_by(month) %>%
+  summarise(total_count = sum(count))
+
+# Combine data from both topics
+opp_topic12_data <- bind_rows(opp_topic1_monthly, opp_topic2_monthly, .id = "topic")
+opp_topic12_data$date <- as.Date(opp_topic12_data$month)
+
+# Plotting
+colnames(opp_topic12_data) <- c("Topic","month","total_count","date")
+opp_topic12_data$Topic <- ifelse(opp_topic12_data$Topic == "1", "Hostility", "Hospitality")
+opp_topic12_data$Topic <- factor(opp_topic12_data$Topic, levels = c("Hostility","Hospitality"))
+
+oppplot <- ggplot(opp_topic12_data, aes(x = month, 
+                             y = total_count, 
+                             color = Topic)) +
+  geom_line(data = subset(opp_topic12_data, Topic == "Hospitality"), linewidth = 0.7, alpha=0.9) +
+  geom_line(data = subset(opp_topic12_data, Topic == "Hostility"), linewidth = 0.7, alpha=0.9) + 
+  labs(title = "Major Opposition Parties (Labour, SNP, Liberal Democrats)", 
+       x = "Month", 
+       y = "Total Count") +
+  geom_vline(xintercept = as.Date("2023-03-01"), linetype = "dashed", color = "black", alpha=0.8) +
+  geom_vline(xintercept = as.Date("2022-03-01"), linetype = "dashed", color = "black", alpha=0.8) +
+  geom_vline(xintercept = as.Date("2015-09-01"), linetype = "dashed", color = "black", alpha=0.8) +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "6 months",
+               date_minor_breaks = "1 month",  
+               expand = c(0, 0),
+               limits = c(as.Date("2015-01-01"), 
+                          max(debate_monthly$month))) +
+  scale_color_manual(values = c("Hostility" = "#DE3163", "Hospitality" = "#69BAFB")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+        legend.position = "bottom",
+        legend.box = "horizontal", 
+        plot.title = element_text(face = "bold"),
+        legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "bold"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold"))
+```
+
+5) Printing Conservative and Labour Party Results
+```{r f5}
+library(gridExtra)
+grid.arrange(conplot, oppplot)
+```
+5) Document Classification Partisan Distribution
+```{r f6}
+con_label <- labeled[labeled$Party=="Conservative",]
+Conservative <- table(con_label$predicted_label)
+
+lab_label <- labeled[labeled$Party=="Labour",]
+Labour <- table(lab_label$predicted_label)
+
+libdem_label <- labeled[labeled$Party=="Liberal Democrats",]
+Liberal_Democrats <- table(libdem_label$predicted_label)
+
+snp_label <- labeled[labeled$Party=="SNP",]
+SNP <- table(snp_label$predicted_label)
+
+party_label <- rbind(Conservative, Labour, SNP, Liberal_Democrats)
+colnames(party_label) <- c("Hostility","Hospitality")
+party_label <- as.data.frame(party_label)
+
+# Convert the row names into a column
+party_label$Party <- rownames(party_label)
+
+# Reshape the data from wide to long format
+party_label_long <- gather(party_label, Label, Frequency, -Party)
+
+# Convert "Party" to a factor with the desired order
+
+party_label_long <- party_label_long %>%
+  group_by(Party) %>%
+  mutate(Proportion = round(100 * Frequency / sum(Frequency), digits = 0))
+party_label_long$Party <- gsub("_", " ", party_label_long$Party)
+
+# Change the order of political parties
+party_order <- c("Conservative", "Labour", "SNP", "Liberal Democrats")
+party_label_long$Party <- factor(party_label_long$Party, levels = party_order)
+
+# Create a stacked bar chart with proportions as labels
+ggplot(party_label_long, aes(x = Party, y = Frequency, fill = Label)) +
+  geom_bar(stat = "identity") +
+  geom_text(data = filter(party_label_long, Label == "Hospitality"),
+            aes(label = paste0(Proportion, "%")), 
+            position = position_stack(vjust = 1), 
+            size = 0, color = "#3F4547") +
+  labs(title = "Sentiment Proportion by Political Party", x = "Party", y = "Frequency") +
+  scale_fill_manual(values = c("Hostility" = "#DE3163", "Hospitality" = "#69BAFB")) +
+  theme(legend.position = "bottom", legend.box = "horizontal", 
+        axis.title = element_text(size = 10, face = "bold"),
+        axis.text.x = element_text(face = "bold.italic"),
+        axis.text.y = element_text(face = "bold"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "bold"))
+
+```
+
+## Attitudinal Dynamics 
+
+1) Document Classification Plot
+```{r g1}
+ukrainian <- labeled %>%
+  filter(grepl("(Ukraine|Ukrainian)", debate_title, ignore.case = TRUE))
+ukrainian$refugee <- "Ukraine"
+
+afghan <- labeled %>%
+  filter(grepl("Afghan", debate_title, ignore.case = TRUE))
+afghan$refugee <- "Afghanistan"
+
+syria <- labeled %>%
+  filter(grepl("Syria", debate_title, ignore.case = TRUE))
+syria$refugee <- "Syria"
+
+english_channel <- labeled %>%
+  filter(grepl("(English Channel|Channel crossing|Migrant crossing|Small Boat Crossings)", debate_title, ignore.case = TRUE))
+english_channel$refugee <- "English Channel"
+nrow(english_channel)
+nrow(english_channel[english_channel$Party=="Conservative",])
+
+child <- labeled %>%
+  filter(grepl("child", debate_title, ignore.case = TRUE))
+child$refugee <- "Children"
+
+child <- labeled %>%
+  filter(grepl("child", debate_title, ignore.case = TRUE))
+child$refugee <- "Children"
+
+family <- labeled %>%
+  filter(grepl("famil", debate_title, ignore.case = TRUE))
+family$refugee <- "Family"
+
+dataset_bytype <- rbind(ukrainian, english_channel, syria, afghan)
+
+# Create a dataset with the counts of document labels by refugee type
+label_counts <- dataset_bytype %>%
+  group_by(refugee, predicted_label) %>%
+  summarise(count = n()) 
+
+label_counts$predicted_label <- ifelse(label_counts$predicted_label == 1, "Hostility", "Hospitality")
+
+# Reorder the refugee column
+desired_order <- c("Afghanistan", "Syria", "Ukraine", "English Channel", "Children")
+label_counts$refugee <- factor(label_counts$refugee, levels = desired_order)
+
+label_counts <- label_counts %>%
+  group_by(refugee) %>%
+  mutate(proportion = count / sum(count))
+
+# Define custom colors with alpha (transparency)
+custom_colors <- c("Hostility" = "#DE3163", "Hospitality" = "#69BAFB")
+
+# Create the plot with custom colors, count labels, and proportion labels
+ggplot(label_counts, aes(x = refugee, y = count, fill = predicted_label)) +
+  geom_bar(stat = "identity") +
+  geom_text(data = filter(label_counts, predicted_label == "Hospitality"),
+            aes(label = paste0(round(proportion * 100, 1), "%")), 
+            vjust = 0.3, size = 3, color = "#3F4547") +  # Add proportion labels
+  labs(x = "Category of Refugee", y = "Count", fill = "Speech Category") +
+  scale_fill_manual(values = custom_colors) +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.box = "horizontal", 
+        axis.title = element_text(size = 10, face = "bold"),
+        axis.text.x = element_text(face = "bold.italic"),
+        axis.text.y = element_text(face = "bold"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "bold"))
+
+
+ggplot(label_counts, aes(x = refugee, y = count, fill = predicted_label)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Category of Refugee", y = "Count", fill = "Speech Category") +
+  scale_fill_manual(values = custom_colors) +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.box = "horizontal", 
+        axis.title = element_text(size = 10, face = "bold"),
+        axis.text.x = element_text(face = "bold.italic"),
+        axis.text.y = element_text(face = "bold"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "bold"))
+```
+
+2) Plot by political party
+```{r g3}
+
+con_type <- dataset_bytype[dataset_bytype$Party=="Conservative",]
+label_counts_con <- con_type %>%
+  group_by(refugee, predicted_label) %>%
+  summarise(count = n())
+label_counts_con$predicted_label <- ifelse(label_counts_con$predicted_label == 1, "Hostility", "Hospitality")
+label_counts_con$refugee <- factor(label_counts_con$refugee, levels = desired_order) # Reorder the refugee column
+
+label_counts_con <- label_counts_con %>%
+  group_by(refugee) %>%
+  mutate(proportion = count / sum(count))
+
+# Create the plot with custom colors, count labels, and proportion labels
+con <- ggplot(label_counts_con, aes(x = refugee, y = count, fill = predicted_label)) +
+  geom_bar(stat = "identity") +
+  geom_text(data = filter(label_counts_con, predicted_label == "Hospitality"),
+            aes(label = paste0(round(proportion * 100, 1), "%")),
+            vjust = 0.3, size = 0, color = "#3F4547") +  # Add proportion labels
+  labs(
+    title = "Conservative",
+    x = " ",
+    y = "Count",
+    fill = "Speech Category"
+  ) +
+  scale_fill_manual(values = custom_colors) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.title = element_text(face="bold"),
+        axis.text.x = element_text(face="bold.italic"),
+        axis.text.y = element_text(face="bold"),
+        legend.text = element_text(face="bold"),
+        legend.title = element_text(face="bold"),
+        title = element_text(face="bold"))
+
+lab_type <- dataset_bytype[dataset_bytype$Party=="Labour",]
+label_counts_lab <- lab_type %>%
+  group_by(refugee, predicted_label) %>%
+  summarise(count = n()) 
+label_counts_lab$predicted_label <- ifelse(label_counts_lab$predicted_label == 1, "Hostility", "Hospitality")
+label_counts_lab$refugee <- factor(label_counts_lab$refugee, levels = desired_order) # Reorder the refugee column
+
+label_counts_lab <- label_counts_lab %>%
+  group_by(refugee) %>%
+  mutate(proportion = count / sum(count))
+
+lab <- ggplot(label_counts_lab, aes(x = refugee, 
+                                    y = count, 
+                                    fill = predicted_label)) +
+  geom_bar(stat = "identity") +
+  geom_text(data = filter(label_counts_lab, predicted_label == "Hospitality"),
+            aes(label = paste0(round(proportion * 100, 1), "%")), 
+            vjust = 0.3, size = 0, color = "#3F4547") +  # Add proportion labels
+  labs(title = "Labour", x = "Category of Refugee",
+       y = "Count", fill = "Speech Category") +
+  scale_fill_manual(values = custom_colors) +
+  theme_minimal() +
+  theme(legend.position = "bottom", 
+        legend.box = "horizontal", 
+        axis.title = element_text(face="bold"),
+        axis.text.x = element_text(face="bold.italic"),
+        axis.text.y = element_text(face="bold"),
+        legend.text = element_text(face="bold"),
+        legend.title = element_text(face="bold"),
+        title = element_text(face="bold"))
+
+grid.arrange(con, lab, nrow = 2)
+```
+
+2) TF-IDF Plot
+```{r g2}
+TypeCorpus <- corpus(dataset_bytype$speech_text, docvars = dataset_bytype) 
+
+custom_stopwords_type <- c("hon", "rose—", "rose", "government", "minister", "prime",
+                           "gentleman", "speaker", "mr","friend","home","secretary",
+                           "friend","right","<",">","can","lady","lady’","people",
+                           "will","Ukraine","France","Ukrainian","Ukrainians",
+                           "french","Syria","afghanistan","Afghan","Afghans",
+                           "syrian","syrians","scheme","resettle","bill","channel","arap","uk")
+
+# TF-IDF 
+type_tfidf <- TypeCorpus %>% 
+  tokens(remove_numbers=T, # remove numbers
+         remove_punct=T) %>% # remove punctuation
+  tokens_remove(stopwords("en")) %>% # remove stopwords
+  tokens_remove(custom_stopwords_type) %>% # remove custom stopwords
+  tokens_wordstem() %>% 
+  dfm(tolower=T) %>% # dfm
+  dfm_trim(min_docfreq = 5) %>% # remove words appearing 5 times or fewer
+  dfm_tfidf() # dfm_weight(scheme="prop") ##
+
+comparison_type <- textstat_frequency(type_tfidf,10,groups=refugee,force=TRUE)
+
+library(cowplot)
+
+# Loop through each party and create a plot
+plots2 <- list()
+
+refugees <- c("Afghanistan", "Syria", "Ukraine", "English Channel")
+colors <- c(
+  "Afghanistan" = "darkgreen",
+  "Syria" = "#c7223a",
+  "Ukraine" = "#0BBFFA",
+  "English Channel" = "#F1910E")
+
+for (refugee in refugees) {
+  p <- ggplot(comparison_type[comparison_type$group == refugee, ],
+              aes(x = frequency,
+                  y = reorder(feature, frequency))) +
+    geom_point(color = colors[refugee]) +
+    ylab("") +
+    xlab("Frequency (TF−IDF weighted)") +
+      theme(plot.title = element_text(size = 12, face = "bold"),
+          axis.text.y = element_text(size = 10, face = "italic"),
+          axis.title.x = element_text(size = 10, face = "italic"))+
+    ggtitle(refugee)
+  
+  plots2[[refugee]] <- p
+}
+
+# Arrange the plots using plot_grid 
+plot_grid(plotlist = plots2, ncol = 2)
+```
